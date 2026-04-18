@@ -390,7 +390,7 @@ export_ai() {
 
   local ts
   ts=$(date '+%Y%m%d_%H%M%S')
-  AI_FILE="${HOME}/storage/downloads/bugscan_ai_${ts}.txt"
+  AI_FILE="${HOME}/projects/bugscan/exports/bugscan_ai_${ts}.txt"
 
   {
     echo "# BUGSCAN REPORT — $(date '+%Y-%m-%d %H:%M:%S')"
