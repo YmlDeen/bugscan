@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # ┌─────────────────────────────────────────────────┐
-# │  bugscan v5.1                                   │
+# │  bugscan v6.0                                   │
 # │  shellcheck (bash) + bandit (python)            │
 # │  + eslint (javascript/typescript)               │
-# │  + pattern check (Claude Code patterns)         │
+# │  + pattern check                                │
+# │  + code snippets + AI-ready prompts             │
 # │  Termux / aarch64 compatible                    │
 # └─────────────────────────────────────────────────┘
 # usage:
 #   bugscan <path>            → summary + HIGH + MEDIUM
-#   bugscan <path> -d         → full detail + fix hints + LOW
-#   bugscan <path> -o         → export .txt + .md + auto-copy $DL
+#   bugscan <path> -d         → full detail + fix hints + LOW + snippets
+#   bugscan <path> -o         → export .txt พร้อม prompt สำเร็จรูป → $DL
 #   bugscan <path> -s <dir>   → ข้าม folder (ใช้ซ้ำได้)
 #   bugscan --file <file>     → scan ไฟล์เดียว
 #   bugscan <path> --json     → output JSON
@@ -17,13 +18,11 @@
 #   bugscan <path> --fix      → autofix safe issues
 #   bugscan --diff            → เทียบ 2 scan ล่าสุด
 #   bugscan <path> --pattern  → pattern check อย่างเดียว
+#   bugscan <path> --ask      → export + เปิด prompt พร้อม paste ใน Claude
 
-VERSION="5.1"
-EXPORT_DIR="${HOME}/projects/bugscan/exports"
+VERSION="6.0"
 DL="/storage/emulated/0/Download"
-
-# ── Default skip (always) ────────────────────────────
-DEFAULT_SKIP=(node_modules dist bundle.js .git)
+SNIPPET_CONTEXT=3  # บรรทัดรอบข้าง issue
 
 # ── Colors ──────────────────────────────────────────
 R='\033[0;31m'
@@ -36,6 +35,9 @@ DIM='\033[2m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# ── Default skip ─────────────────────────────────────
+DEFAULT_SKIP=(node_modules dist bundle.js .git __pycache__ .pytest_cache venv)
+
 # ── State ────────────────────────────────────────────
 SCAN_PATH=""
 SINGLE_FILE=""
@@ -44,6 +46,7 @@ SKIP_DIRS=()
 JSON_MODE=false
 FIX_MODE=""
 PATTERN_ONLY=false
+ASK_MODE=false
 TMPDIR_SCAN=$(mktemp -d)
 RESULTS_FILE="$TMPDIR_SCAN/results.txt"
 PATTERN_FILE="$TMPDIR_SCAN/patterns.txt"
@@ -64,11 +67,12 @@ trap cleanup EXIT
 # ── Usage ─────────────────────────────────────────────
 usage() {
   echo ""
-  echo -e "${BOLD}bugscan v${VERSION}${NC} — shellcheck + bandit + eslint + pattern"
+  echo -e "${BOLD}bugscan v${VERSION}${NC} — shellcheck + bandit + eslint + pattern + AI-ready"
   echo ""
   echo "  bugscan <path>            summary + HIGH + MEDIUM"
-  echo "  bugscan <path> -d         detail + fix hints + LOW"
-  echo "  bugscan <path> -o         export .txt + .md → exports/"
+  echo "  bugscan <path> -d         detail + fix hints + LOW + snippets"
+  echo "  bugscan <path> -o         export .txt พร้อม prompt สำเร็จรูป → \$DL"
+  echo "  bugscan <path> --ask      export + แสดง prompt พร้อม paste ให้ Claude"
   echo "  bugscan <path> -s <dir>   ข้าม dir (ใช้ซ้ำได้)"
   echo "  bugscan --file <file>     scan ไฟล์เดียว"
   echo "  bugscan <path> --json     output JSON"
@@ -80,10 +84,9 @@ usage() {
   echo "  examples:"
   echo "    bugscan ."
   echo "    bugscan --file myscript.sh"
-  echo "    bugscan ~/projects/exl -o"
+  echo "    bugscan ~/projects/linkbox -o"
   echo "    bugscan . -d -s node_modules"
-  echo "    bugscan . --fix-dry"
-  echo "    bugscan . --pattern"
+  echo "    bugscan . --ask"
   echo ""
 }
 
@@ -119,6 +122,7 @@ parse_args() {
       --fix-dry)   FIX_MODE="dry" ;;
       --fix)       FIX_MODE="apply" ;;
       --pattern)   PATTERN_ONLY=true ;;
+      --ask)       ASK_MODE=true; MODE="export" ;;
       -h|--help)   usage; exit 0 ;;
       *) echo -e "${R}unknown option:${NC} $1"; usage; exit 1 ;;
     esac
@@ -159,7 +163,6 @@ find_files() {
   local args=()
   args+=("$SCAN_PATH" -type f -name "*.$ext")
 
-  # skip default + user-defined
   local all_skip=("${DEFAULT_SKIP[@]}" "${SKIP_DIRS[@]}")
   for d in "${all_skip[@]}"; do
     args+=(-not -path "*/${d}/*" -not -path "*/${d}" -not -name "$d")
@@ -182,6 +185,34 @@ bd_level() {
     MEDIUM) echo "MEDIUM" ;;
     *)      echo "LOW"    ;;
   esac
+}
+
+# ════════════════════════════════════════════════════
+#  GET CODE SNIPPET — ดึง code จริงรอบบรรทัด issue
+# ════════════════════════════════════════════════════
+get_snippet() {
+  local file="$1"
+  local lineno="$2"
+  local context="${3:-$SNIPPET_CONTEXT}"
+
+  [[ ! -f "$file" ]] && return
+  [[ ! "$lineno" =~ ^[0-9]+$ ]] && return
+
+  local total_lines
+  total_lines=$(wc -l < "$file" 2>/dev/null)
+  [[ -z "$total_lines" || "$total_lines" -eq 0 ]] && return
+
+  local start=$(( lineno - context ))
+  local end=$(( lineno + context ))
+  [[ $start -lt 1 ]] && start=1
+  [[ $end -gt $total_lines ]] && end=$total_lines
+
+  awk -v s="$start" -v e="$end" -v target="$lineno" '
+    NR >= s && NR <= e {
+      marker = (NR == target) ? ">>>" : "   "
+      printf "%s %4d | %s\n", marker, NR, $0
+    }
+  ' "$file"
 }
 
 # ════════════════════════════════════════════════════
@@ -301,8 +332,7 @@ run_eslint() {
 }
 
 # ════════════════════════════════════════════════════
-#  PATTERN CHECK (Claude Code patterns)
-#  ตรวจ pattern สำคัญที่ production code ควรมี
+#  PATTERN CHECK
 # ════════════════════════════════════════════════════
 run_pattern_check() {
   local files=()
@@ -318,11 +348,9 @@ run_pattern_check() {
   [[ ${#files[@]} -eq 0 ]] && return
 
   for f in "${files[@]}"; do
-    local relfile="${f#"$SCAN_PATH/"}"
     local ext="${f##*.}"
 
-    # ── P1: console.log หลุด production ──────────────
-    # pattern: debugFilter — Claude Code มี src/utils/debugFilter.ts
+    # P1: console.log หลุด production
     if [[ "$ext" == "js" || "$ext" == "ts" || "$ext" == "jsx" || "$ext" == "tsx" ]]; then
       if grep -qn 'console\.log' "$f" 2>/dev/null; then
         local lineno
@@ -331,19 +359,17 @@ run_pattern_check() {
       fi
     fi
 
-    # ── P2: async ไม่มี try/catch ────────────────────
-    # pattern: errorHandler — Claude Code ครอบ async ทุกที่
+    # P2: async ไม่มี try/catch
     if [[ "$ext" == "js" || "$ext" == "ts" || "$ext" == "jsx" || "$ext" == "tsx" ]]; then
       local async_lines trycatch_lines
-      async_lines=$(grep -n 'async function\|async (' "$f" 2>/dev/null | wc -l); async_lines=$(( async_lines + 0 ))
-      trycatch_lines=$(grep -n 'try {' "$f" 2>/dev/null | wc -l); trycatch_lines=$(( trycatch_lines + 0 ))
+      async_lines=$(grep -c 'async function\|async (' "$f" 2>/dev/null); async_lines=$(( async_lines + 0 ))
+      trycatch_lines=$(grep -c 'try {' "$f" 2>/dev/null); trycatch_lines=$(( trycatch_lines + 0 ))
       if [[ $async_lines -gt 0 && $trycatch_lines -eq 0 ]]; then
         echo "PATTERN|${f}|1|P002|มี async ${async_lines} จุด แต่ไม่มี try/catch เลย — เสี่ยง unhandled rejection|pattern" >> "$PATTERN_FILE"
       fi
     fi
 
-    # ── P3: process exit ไม่มี cleanup ───────────────
-    # pattern: cleanupRegistry — Claude Code มี src/utils/cleanupRegistry.ts
+    # P3: server ไม่มี cleanup
     if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
       local has_server has_cleanup
       has_server=$(grep -c 'listen\|createServer\|express()' "$f" 2>/dev/null); has_server=$(( has_server + 0 ))
@@ -353,8 +379,7 @@ run_pattern_check() {
       fi
     fi
 
-    # ── P4: write file ไม่มี error handling ──────────
-    # pattern: bufferedWriter — Claude Code มี src/utils/bufferedWriter.ts
+    # P4: fs.write ไม่มี error handling
     if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
       if grep -qn 'fs\.writeFile\|fs\.appendFile\|fs\.writeFileSync' "$f" 2>/dev/null; then
         local write_lines
@@ -367,8 +392,7 @@ run_pattern_check() {
       fi
     fi
 
-    # ── P5: hardcoded secret ──────────────────────────
-    # pattern: envUtils — Claude Code มี src/utils/envUtils.ts
+    # P5: hardcoded secret
     if [[ "$ext" == "js" || "$ext" == "ts" || "$ext" == "sh" || "$ext" == "py" ]]; then
       local secret_line
       secret_line=$(grep -in 'api_key\s*=\s*["'"'"'][^$"'"'"']\|password\s*=\s*["'"'"'][^$"'"'"']\|secret\s*=\s*["'"'"'][^$"'"'"']' "$f" 2>/dev/null | head -1)
@@ -379,16 +403,37 @@ run_pattern_check() {
       fi
     fi
 
-    # ── P6: shell script ไม่มี set -e ────────────────
+    # P6: shell script ไม่มี set -e
     if [[ "$ext" == "sh" ]]; then
       if ! grep -q 'set -e\|set -euo\|set -eu' "$f" 2>/dev/null; then
         echo "PATTERN|${f}|1|P006|script ไม่มี set -euo pipefail — error จะถูกกลืนโดยไม่รู้ตัว|pattern" >> "$PATTERN_FILE"
       fi
     fi
 
-    # ── P7: .env ถูก commit ────────────────────────────
+    # P7: .env ถูก commit
     if [[ "$f" == *".env" && "$f" != *".env.example"* && "$f" != *".env.sample"* ]]; then
       echo "PATTERN|${f}|1|P007|ไฟล์ .env อยู่ใน project — ตรวจว่าอยู่ใน .gitignore แล้วหรือยัง|pattern" >> "$PATTERN_FILE"
+    fi
+
+    # P8: input validation หายไป (JS/TS)
+    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
+      local has_req has_validate
+      has_req=$(grep -c 'req\.body\|req\.params\|req\.query' "$f" 2>/dev/null); has_req=$(( has_req + 0 ))
+      has_validate=$(grep -c 'validate\|sanitize\|joi\|zod\|yup\|express-validator' "$f" 2>/dev/null); has_validate=$(( has_validate + 0 ))
+      if [[ $has_req -gt 2 && $has_validate -eq 0 ]]; then
+        local lineno
+        lineno=$(grep -n 'req\.body\|req\.params\|req\.query' "$f" | head -1 | cut -d: -f1)
+        echo "PATTERN|${f}|${lineno}|P008|ใช้ req.body/params ${has_req} จุด แต่ไม่มี input validation — SQL injection / XSS risk|pattern" >> "$PATTERN_FILE"
+      fi
+    fi
+
+    # P9: SQL query แบบ string concat
+    if [[ "$ext" == "js" || "$ext" == "ts" || "$ext" == "py" ]]; then
+      if grep -qn 'query.*+.*req\.\|execute.*+.*req\.\|query.*\${' "$f" 2>/dev/null; then
+        local lineno
+        lineno=$(grep -n 'query.*+.*req\.\|execute.*+.*req\.\|query.*\${' "$f" | head -1 | cut -d: -f1)
+        echo "PATTERN|${f}|${lineno}|P009|SQL string concatenation — SQL injection risk สูงมาก ใช้ parameterized query แทน|pattern" >> "$PATTERN_FILE"
+      fi
     fi
 
   done
@@ -405,9 +450,6 @@ count_results() {
   COUNT_HIGH=$(grep -c '^HIGH|'   "$RESULTS_FILE" 2>/dev/null); COUNT_HIGH=$(( COUNT_HIGH + 0 ))
   COUNT_MED=$(grep  -c '^MEDIUM|' "$RESULTS_FILE" 2>/dev/null); COUNT_MED=$(( COUNT_MED + 0 ))
   COUNT_LOW=$(grep  -c '^LOW|'    "$RESULTS_FILE" 2>/dev/null); COUNT_LOW=$(( COUNT_LOW + 0 ))
-  COUNT_HIGH=$(( COUNT_HIGH + 0 ))
-  COUNT_MED=$(( COUNT_MED + 0 ))
-  COUNT_LOW=$(( COUNT_LOW + 0 ))
 }
 
 # ── Bar chart ─────────────────────────────────────────
@@ -505,6 +547,8 @@ pattern_hint() {
     P005) echo "→ FIX: ย้ายไป .env  ex: const key = process.env.API_KEY" ;;
     P006) echo "→ FIX: เพิ่ม set -euo pipefail บรรทัดแรกหลัง shebang" ;;
     P007) echo "→ CHECK: เพิ่ม .env ใน .gitignore ถ้ายังไม่มี" ;;
+    P008) echo "→ FIX: ใช้ express-validator หรือ zod validate req.body ก่อน process" ;;
+    P009) echo "→ FIX: ใช้ parameterized query  ex: db.query('SELECT * WHERE id=?', [id])" ;;
     *)    echo "→ INFO: ตรวจสอบด้วยตนเอง" ;;
   esac
 }
@@ -575,7 +619,7 @@ run_autofix() {
 }
 
 # ════════════════════════════════════════════════════
-#  PRINT ISSUES
+#  PRINT ISSUES (terminal)
 # ════════════════════════════════════════════════════
 color_level() {
   case "$1" in
@@ -614,11 +658,22 @@ print_issues() {
     printf "%b[%s] %s:%s  %s\n" "$clevel" "$code" "$relfile" "$lineno" "$msg"
 
     if [[ "$MODE" == "detail" ]]; then
-      local hint
+      local hint=""
       [[ "$tool" == "bash" ]]    && hint=$(sc_hint "$code" "$msg")
       [[ "$tool" == "python" ]]  && hint=$(bd_hint "$code")
       [[ "$tool" == "javascript" || "$tool" == "typescript" ]] && hint="→ ดู eslint docs: ${code}"
       echo -e "         ${DIM}${hint}${NC}"
+
+      # แสดง snippet ใน terminal mode -d
+      local snippet
+      snippet=$(get_snippet "$file" "$lineno")
+      if [[ -n "$snippet" ]]; then
+        echo -e "${DIM}         ┌─ code ─────────────────────────${NC}"
+        while IFS= read -r sline; do
+          echo -e "${DIM}         │ ${sline}${NC}"
+        done <<< "$snippet"
+        echo -e "${DIM}         └────────────────────────────────${NC}"
+      fi
     fi
   done
 }
@@ -627,7 +682,7 @@ print_patterns() {
   [[ ! -f "$PATTERN_FILE" ]] && return
   [[ $COUNT_PATTERN -eq 0 ]] && return
 
-  echo -e "${C}── pattern check (Claude Code patterns) ────────${NC}"
+  echo -e "${C}── pattern check ────────────────────────────────${NC}"
 
   while IFS='|' read -r _ file lineno code msg _; do
     local relfile="${file#"$SCAN_PATH/"}"
@@ -636,9 +691,167 @@ print_patterns() {
       local hint
       hint=$(pattern_hint "$code")
       echo -e "         ${DIM}${hint}${NC}"
+
+      local snippet
+      snippet=$(get_snippet "$file" "$lineno")
+      if [[ -n "$snippet" ]]; then
+        echo -e "${DIM}         ┌─ code ─────────────────────────${NC}"
+        while IFS= read -r sline; do
+          echo -e "${DIM}         │ ${sline}${NC}"
+        done <<< "$snippet"
+        echo -e "${DIM}         └────────────────────────────────${NC}"
+      fi
     fi
   done < "$PATTERN_FILE"
   echo ""
+}
+
+# ════════════════════════════════════════════════════
+#  BUILD AI PROMPT — สร้าง prompt สำเร็จรูปสำหรับ Claude
+# ════════════════════════════════════════════════════
+build_ai_prompt() {
+  local label="$SCAN_PATH"
+  [[ -n "$SINGLE_FILE" ]] && label="$SINGLE_FILE"
+  local project_name
+  project_name=$(basename "$label")
+
+  local total=$(( COUNT_HIGH + COUNT_MED + COUNT_LOW ))
+
+  # นับ HIGH + PATTERN เพื่อ priority
+  local critical=$(( COUNT_HIGH + COUNT_PATTERN ))
+
+  echo "================================================================"
+  echo "BUGSCAN REPORT — ${project_name}"
+  echo "สแกนเมื่อ: $(date '+%Y-%m-%d %H:%M:%S')"
+  echo "bugscan v${VERSION}"
+  echo "================================================================"
+  echo ""
+  echo "SUMMARY"
+  echo "  HIGH      : $COUNT_HIGH"
+  echo "  MEDIUM    : $COUNT_MED"
+  echo "  LOW       : $COUNT_LOW"
+  echo "  PATTERN   : $COUNT_PATTERN"
+  echo "  TOTAL     : $total"
+  echo ""
+
+  # ── ISSUES พร้อม snippet ────────────────────────
+  if [[ -f "$RESULTS_FILE" && $(wc -l < "$RESULTS_FILE") -gt 0 ]]; then
+    echo "================================================================"
+    echo "ISSUES (พร้อม code snippet)"
+    echo "================================================================"
+    echo ""
+
+    sort -t'|' -k1,1 "$RESULTS_FILE" | \
+    while IFS='|' read -r level file lineno code msg tool; do
+      local relfile="${file#"$SCAN_PATH/"}"
+      echo "────────────────────────────────────────"
+      echo "[$level] [$code] $relfile:$lineno"
+      echo "issue  : $msg"
+
+      local hint=""
+      [[ "$tool" == "bash" ]]    && hint=$(sc_hint "$code" "$msg")
+      [[ "$tool" == "python" ]]  && hint=$(bd_hint "$code")
+      [[ -n "$hint" ]] && echo "hint   : $hint"
+
+      echo ""
+      echo "code snippet:"
+      echo '```'
+      get_snippet "$file" "$lineno" 4
+      echo '```'
+      echo ""
+    done
+  fi
+
+  # ── PATTERNS พร้อม snippet ───────────────────────
+  if [[ -f "$PATTERN_FILE" && $COUNT_PATTERN -gt 0 ]]; then
+    echo "================================================================"
+    echo "PATTERNS"
+    echo "================================================================"
+    echo ""
+
+    while IFS='|' read -r _ file lineno code msg _; do
+      local relfile="${file#"$SCAN_PATH/"}"
+      echo "────────────────────────────────────────"
+      echo "[PATTERN] [$code] $relfile:$lineno"
+      echo "issue  : $msg"
+      echo "hint   : $(pattern_hint "$code")"
+      echo ""
+      echo "code snippet:"
+      echo '```'
+      get_snippet "$file" "$lineno" 4
+      echo '```'
+      echo ""
+    done < "$PATTERN_FILE"
+  fi
+
+  # ── AI PROMPT สำเร็จรูป ─────────────────────────
+  echo "================================================================"
+  echo "PROMPT สำเร็จรูป — copy ข้อความด้านล่างนี้ paste ให้ Claude"
+  echo "================================================================"
+  echo ""
+
+  if [[ $total -eq 0 && $COUNT_PATTERN -eq 0 ]]; then
+    echo "โปรเจกต์ $project_name สะอาด ไม่พบปัญหา"
+  elif [[ $COUNT_HIGH -gt 0 ]]; then
+    echo "นี่คือ bugscan report ของ ${project_name}"
+    echo "มี HIGH ${COUNT_HIGH} จุด และ PATTERN ${COUNT_PATTERN} จุด"
+    echo "ช่วย fix HIGH ทุกตัวก่อน โดยแสดง code ที่แก้แล้วพร้อม before/after"
+    echo "แต่ละ issue มี snippet แนบมาแล้ว ไม่ต้องเดา context"
+  elif [[ $COUNT_PATTERN -gt 0 ]]; then
+    echo "นี่คือ bugscan report ของ ${project_name}"
+    echo "ไม่มี HIGH แต่มี PATTERN ${COUNT_PATTERN} จุดที่ควรแก้"
+    echo "ช่วยอธิบาย PATTERN แต่ละตัว และแสดง code ที่แก้แล้ว"
+  else
+    echo "นี่คือ bugscan report ของ ${project_name}"
+    echo "มี MEDIUM ${COUNT_MED} จุด ช่วย fix และอธิบายเหตุผลที่แก้"
+  fi
+  echo ""
+  echo "================================================================"
+}
+
+# ════════════════════════════════════════════════════
+#  EXPORT MODE — save ตรงไป $DL พร้อม AI prompt
+# ════════════════════════════════════════════════════
+export_files() {
+  local ts
+  ts=$(date '+%Y%m%d_%H%M%S')
+  local dl_file="${DL}/bugscan_${ts}.txt"
+
+  build_ai_prompt > "$dl_file"
+
+  echo -e "${G}✓ Export: Download/bugscan_${ts}.txt${NC}"
+  echo -e "${DIM}  share bugscan_${ts}.txt → แนบใน Claude ได้เลย${NC}"
+  echo ""
+
+  # ถ้า --ask ให้แสดง prompt สำเร็จรูปใน terminal ด้วย
+  if $ASK_MODE; then
+    local total=$(( COUNT_HIGH + COUNT_MED + COUNT_LOW ))
+    local project_name
+    project_name=$(basename "${SCAN_PATH}")
+    [[ -n "$SINGLE_FILE" ]] && project_name=$(basename "$SINGLE_FILE")
+
+    echo ""
+    echo -e "${M}┌─────────────────────────────────────────────────┐${NC}"
+    echo -e "${M}│  PROMPT สำเร็จรูป — copy ไป paste ให้ Claude   │${NC}"
+    echo -e "${M}└─────────────────────────────────────────────────┘${NC}"
+    echo ""
+
+    if [[ $COUNT_HIGH -gt 0 ]]; then
+      echo -e "${BOLD}นี่คือ bugscan report ของ ${project_name}"
+      echo -e "มี HIGH ${COUNT_HIGH} จุด และ PATTERN ${COUNT_PATTERN} จุด"
+      echo -e "ช่วย fix HIGH ทุกตัวก่อน โดยแสดง code ที่แก้แล้วพร้อม before/after${NC}"
+    elif [[ $COUNT_PATTERN -gt 0 ]]; then
+      echo -e "${BOLD}นี่คือ bugscan report ของ ${project_name}"
+      echo -e "ไม่มี HIGH แต่มี PATTERN ${COUNT_PATTERN} จุดที่ควรแก้"
+      echo -e "ช่วยอธิบาย PATTERN แต่ละตัว และแสดง code ที่แก้แล้ว${NC}"
+    else
+      echo -e "${BOLD}นี่คือ bugscan report ของ ${project_name}"
+      echo -e "ช่วย fix และอธิบายเหตุผลที่แก้${NC}"
+    fi
+    echo ""
+    echo -e "${DIM}(แนบไฟล์ bugscan_${ts}.txt ไปด้วย)${NC}"
+    echo ""
+  fi
 }
 
 # ════════════════════════════════════════════════════
@@ -666,9 +879,11 @@ print_json() {
     while IFS='|' read -r level file lineno code msg tool; do
       local relfile="${file#"$SCAN_PATH/"}"
       msg="${msg//\"/\\\"}"
+      local snippet_raw
+      snippet_raw=$(get_snippet "$file" "$lineno" 2 | sed 's/"/\\"/g' | tr '\n' '↵')
       [[ "$first" == true ]] && first=false || echo ","
-      printf '    {"level":"%s","file":"%s","line":%s,"code":"%s","msg":"%s","tool":"%s"}' \
-        "$level" "$relfile" "$lineno" "$code" "$msg" "$tool"
+      printf '    {"level":"%s","file":"%s","line":%s,"code":"%s","msg":"%s","tool":"%s","snippet":"%s"}' \
+        "$level" "$relfile" "$lineno" "$code" "$msg" "$tool" "$snippet_raw"
     done < <(sort -t'|' -k1,1 "$RESULTS_FILE")
   fi
 
@@ -690,71 +905,6 @@ print_json() {
   echo ""
   echo "  ]"
   echo "}"
-}
-
-# ════════════════════════════════════════════════════
-#  EXPORT MODE — save ตรงไป $DL
-# ════════════════════════════════════════════════════
-export_files() {
-  local ts
-  ts=$(date '+%Y%m%d_%H%M%S')
-  local dl_file="${DL}/bugscan_${ts}.txt"
-
-  local sc_ver bd_ver
-  sc_ver=$(shellcheck --version 2>/dev/null | grep 'version:' | awk '{print $2}')
-  bd_ver=$(bandit --version 2>/dev/null | awk '{print $2}')
-  local total=$(( COUNT_HIGH + COUNT_MED + COUNT_LOW ))
-  local label="$SCAN_PATH"
-  [[ -n "$SINGLE_FILE" ]] && label="$SINGLE_FILE"
-
-  {
-    echo "# BUGSCAN REPORT — $(date '+%Y-%m-%d %H:%M:%S')"
-    echo "# path: $label"
-    echo "# tool: shellcheck v${sc_ver} + bandit v${bd_ver} + eslint + pattern"
-    echo "# version: bugscan v${VERSION}"
-    echo ""
-    echo "## SUMMARY"
-    echo "  .sh files : $SH_FILE_COUNT"
-    echo "  .py files : $PY_FILE_COUNT"
-    echo "  .js files : $JS_FILE_COUNT"
-    echo "  HIGH      : $COUNT_HIGH"
-    echo "  MEDIUM    : $COUNT_MED"
-    echo "  LOW       : $COUNT_LOW"
-    echo "  PATTERN   : $COUNT_PATTERN"
-    echo "  TOTAL     : $total"
-    echo ""
-    echo "## ISSUES"
-    echo ""
-    if [[ -f "$RESULTS_FILE" ]]; then
-      sort -t'|' -k1,1 "$RESULTS_FILE" | \
-      while IFS='|' read -r level file lineno code msg tool; do
-        local relfile="${file#"$SCAN_PATH/"}"
-        printf "[%s] [%s] %s:%s\n" "$level" "$code" "$relfile" "$lineno"
-        printf "  issue : %s\n" "$msg"
-        local hint=""
-        [[ "$tool" == "bash" ]]   && hint=$(sc_hint "$code" "$msg")
-        [[ "$tool" == "python" ]] && hint=$(bd_hint "$code")
-        printf "  %s\n\n" "$hint"
-      done
-    fi
-    echo "## PATTERNS"
-    echo ""
-    if [[ -f "$PATTERN_FILE" ]]; then
-      while IFS='|' read -r _ file lineno code msg _; do
-        local relfile="${file#"$SCAN_PATH/"}"
-        printf "[PATTERN] [%s] %s:%s\n" "$code" "$relfile" "$lineno"
-        printf "  issue : %s\n" "$msg"
-        printf "  %s\n\n" "$(pattern_hint "$code")"
-      done < "$PATTERN_FILE"
-    fi
-    echo "## HOW TO USE"
-    echo "  paste ให้ Claude แล้วบอกว่า:"
-    echo "  'ช่วย fix issues เหล่านี้ใน <filename>'"
-    echo "  หรือ 'อธิบาย HIGH + PATTERN issues ทุกตัว'"
-  } > "$dl_file"
-
-  echo -e "${G}✓ Download/$(basename "$dl_file")${NC}  ${DIM}← แนบใน Claude ได้เลย${NC}"
-  echo ""
 }
 
 # ════════════════════════════════════════════════════
@@ -824,8 +974,9 @@ print_tips() {
   local total=$(( COUNT_HIGH + COUNT_MED + COUNT_LOW + COUNT_PATTERN ))
   [[ $total -eq 0 ]] && return
   echo -e "${DIM}tips:"
-  [[ "$MODE" == "default" ]] && echo -e "  -d        → ดู fix hints + LOW"
-  echo -e "  -o        → export .txt + .md (ส่ง Claude ได้เลย)"
+  [[ "$MODE" == "default" ]] && echo -e "  -d        → ดู fix hints + snippets + LOW"
+  echo -e "  -o        → export พร้อม AI prompt → \$DL"
+  echo -e "  --ask     → export + แสดง prompt พร้อม paste ให้ Claude"
   echo -e "  --fix-dry → preview autofix"
   echo -e "  --fix     → autofix safe issues"
   echo -e "  --pattern → pattern check อย่างเดียว"
