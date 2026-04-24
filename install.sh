@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # install.sh — ติดตั้ง bugscan ให้ใช้งานได้ทั่วระบบ
 # usage: bash install.sh
 
