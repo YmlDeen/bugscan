@@ -1,0 +1,7 @@
+{
+  "name": "bugscan",
+  "version": "4.0.0",
+  "description": "Static analysis CLI for Termux projects",
+  "bin": { "bs": "./bugscan.sh" },
+  "license": "MIT"
+}
