@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ┌─────────────────────────────────────────────────┐
-# │  bugscan v7.0                                   │
+# │  bugscan v6.0                                   │
 # │  shellcheck (bash) + bandit (python)            │
 # │  + eslint (javascript/typescript)               │
 # │  + pattern check                                │
@@ -20,7 +20,7 @@
 #   bugscan <path> --pattern  → pattern check อย่างเดียว
 #   bugscan <path> --ask      → export + เปิด prompt พร้อม paste ใน Claude
 
-VERSION="7.0"
+VERSION="6.0"
 DL="/storage/emulated/0/Download"
 SNIPPET_CONTEXT=3  # บรรทัดรอบข้าง issue
 
@@ -342,7 +342,7 @@ run_pattern_check() {
     find_files "jsx"
     find_files "tsx"
     find_files "sh"
-
+    find_files "py"
   )
 
   [[ ${#files[@]} -eq 0 ]] && return
@@ -437,163 +437,6 @@ run_pattern_check() {
     fi
 
   done
-
-
-    # ── SECURITY ────────────────────────────────────────────
-
-    # P010: JWT secret hardcode
-    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
-      if grep -qn 'jwt\.sign\|jsonwebtoken' "$f" 2>/dev/null; then
-        if grep -qn 'secret.*['"'"'"][a-zA-Z0-9]\{8,\}['"'"'"]' "$f" 2>/dev/null; then
-          local ln; ln=$(grep -n 'secret.*['"'"'"][a-zA-Z0-9]\{8,\}['"'"'"]' "$f" | head -1 | cut -d: -f1)
-          echo "PATTERN|${f}|${ln}|P010|JWT secret hardcode — ย้ายไป process.env.JWT_SECRET|pattern" >> "$PATTERN_FILE"
-        fi
-      fi
-    fi
-
-    # P011: weak crypto MD5/SHA1
-    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
-      if grep -qin "createHash.*'md5'\|createHash.*'sha1'\|createHash.*\"md5\"\|createHash.*\"sha1\"" "$f" 2>/dev/null; then
-        local ln; ln=$(grep -in "createHash.*md5\|createHash.*sha1" "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P011|weak crypto MD5/SHA1 — ใช้ SHA256 หรือ bcrypt แทน|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P012: token ใน URL
-    if [[ "$ext" == "js" || "$ext" == "ts" || "$ext" == "py" ]]; then
-      if grep -qin 'http.*token=\|http.*api_key=\|http.*apikey=' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -in 'http.*token=\|http.*api_key=' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P012|token/key ใน URL — ใช้ Authorization header แทน|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P013: eval() ใน JS/TS
-    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
-      if grep -qn '\beval(' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -n '\beval(' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P013|eval() อันตราย — code injection risk สูง|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P014: prototype pollution
-    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
-      if grep -qn '__proto__' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -n '__proto__' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P014|prototype pollution risk — ตรวจ input ก่อน merge object|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # ── PERFORMANCE ──────────────────────────────────────────
-
-    # P015: await ใน loop
-    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
-      if grep -qn 'for.*{' "$f" 2>/dev/null && grep -qn 'await ' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -n 'await ' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P015|await อาจอยู่ใน loop — ใช้ Promise.all() แทนเพื่อ parallel|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P016: sync fs ใน async context
-    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
-      local sync_count; sync_count=$(grep -c 'readFileSync\|writeFileSync\|existsSync' "$f" 2>/dev/null); sync_count=$(( sync_count + 0 ))
-      local async_count; async_count=$(grep -c '\basync\b' "$f" 2>/dev/null); async_count=$(( async_count + 0 ))
-      if [[ $sync_count -gt 0 && $async_count -gt 0 ]]; then
-        local ln; ln=$(grep -n 'readFileSync\|writeFileSync\|existsSync' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P016|sync fs ใน async context — บล็อก event loop ใช้ fs.promises แทน|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P017: event listener ไม่มี remove
-    if [[ "$ext" == "js" || "$ext" == "ts" ]]; then
-      local add_count; add_count=$(grep -c 'addEventListener\|\.on(' "$f" 2>/dev/null); add_count=$(( add_count + 0 ))
-      local rm_count; rm_count=$(grep -c 'removeEventListener\|\.off(\|\.removeListener(' "$f" 2>/dev/null); rm_count=$(( rm_count + 0 ))
-      if [[ $add_count -gt 2 && $rm_count -eq 0 ]]; then
-        echo "PATTERN|${f}|1|P017|event listener ${add_count} จุด ไม่มี removeListener — memory leak risk|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # ── CODE QUALITY ─────────────────────────────────────────
-
-    # P018: TODO/FIXME มากเกิน
-    local todo_count; todo_count=$(grep -c 'TODO\|FIXME\|HACK\|XXX' "$f" 2>/dev/null); todo_count=$(( todo_count + 0 ))
-    if [[ $todo_count -gt 3 ]]; then
-      echo "PATTERN|${f}|1|P018|มี TODO/FIXME ${todo_count} จุด — ค้างอยู่นาน ควร track ใน issue|pattern" >> "$PATTERN_FILE"
-    fi
-
-    # P019: TypeScript any type
-    if [[ "$ext" == "ts" || "$ext" == "tsx" ]]; then
-      local any_count; any_count=$(grep -c ': any\b\|as any\b' "$f" 2>/dev/null); any_count=$(( any_count + 0 ))
-      if [[ $any_count -gt 2 ]]; then
-        local ln; ln=$(grep -n ': any\b\|as any\b' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P019|TypeScript any ${any_count} จุด — ใส่ type จริงหรือ unknown แทน|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P020: non-null assertion TS
-    if [[ "$ext" == "ts" || "$ext" == "tsx" ]]; then
-      local bang_count; bang_count=$(grep -c '[a-zA-Z0-9]!' "$f" 2>/dev/null); bang_count=$(( bang_count + 0 ))
-      if [[ $bang_count -gt 3 ]]; then
-        local ln; ln=$(grep -n '[a-zA-Z0-9]!' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P020|non-null assertion (!) ${bang_count} จุด — เสี่ยง runtime null crash|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P021: ไฟล์ใหญ่ > 300 บรรทัด
-    local line_count; line_count=$(wc -l < "$f" 2>/dev/null); line_count=$(( line_count + 0 ))
-    if [[ $line_count -gt 300 && "$ext" != "md" ]]; then
-      echo "PATTERN|${f}|1|P021|ไฟล์ใหญ่ ${line_count} บรรทัด — ควร split module ให้เล็กลง|pattern" >> "$PATTERN_FILE"
-    fi
-
-    # ── DOCKER / CONFIG ──────────────────────────────────────
-
-    # P022: Dockerfile FROM :latest
-    local fname; fname=$(basename "$f")
-    if [[ "$fname" == "Dockerfile" || "$fname" == "dockerfile" ]]; then
-      if grep -qin 'FROM.*:latest' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -in 'FROM.*:latest' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P022|Dockerfile FROM :latest — pin version เช่น node:20-alpine|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P023: Dockerfile ไม่มี USER
-    if [[ "$fname" == "Dockerfile" || "$fname" == "dockerfile" ]]; then
-      if ! grep -qi '^USER ' "$f" 2>/dev/null; then
-        echo "PATTERN|${f}|1|P023|Dockerfile ไม่มี USER — container รันเป็น root|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P024: secret ใน Dockerfile ENV
-    if [[ "$fname" == "Dockerfile" || "$fname" == "dockerfile" ]]; then
-      if grep -qin 'ENV.*PASSWORD\|ENV.*SECRET\|ENV.*API_KEY' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -in 'ENV.*PASSWORD\|ENV.*SECRET\|ENV.*API_KEY' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P024|secret ใน Dockerfile ENV — ใช้ runtime secret แทน|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P025: hardcoded localhost URL
-    if [[ "$ext" == "js" || "$ext" == "ts" || "$ext" == "py" ]]; then
-      if grep -qn 'http://localhost\|http://127\.0\.0\.1' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -n 'http://localhost\|http://127\.0\.0\.1' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P025|hardcoded localhost URL — ใช้ process.env.BASE_URL แทน|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P026: curl|bash ใน package.json
-    if [[ "$fname" == "package.json" ]]; then
-      if grep -qn 'curl.*bash\|wget.*bash' "$f" 2>/dev/null; then
-        local ln; ln=$(grep -n 'curl.*bash\|wget.*bash' "$f" | head -1 | cut -d: -f1)
-        echo "PATTERN|${f}|${ln}|P026|curl|bash ใน package.json scripts — supply chain risk|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
-
-    # P027: React ไม่มี ErrorBoundary
-    if [[ "$ext" == "jsx" || "$ext" == "tsx" ]]; then
-      local has_boundary; has_boundary=$(grep -c 'ErrorBoundary\|componentDidCatch' "$f" 2>/dev/null); has_boundary=$(( has_boundary + 0 ))
-      local has_comp; has_comp=$(grep -c 'export default\|export const' "$f" 2>/dev/null); has_comp=$(( has_comp + 0 ))
-      if [[ $has_comp -gt 0 && $has_boundary -eq 0 ]]; then
-        echo "PATTERN|${f}|1|P027|React component ไม่มี ErrorBoundary — crash พัง UI ทั้งหน้า|pattern" >> "$PATTERN_FILE"
-      fi
-    fi
 
   COUNT_PATTERN=0
   if [[ -f "$PATTERN_FILE" ]]; then
@@ -706,24 +549,6 @@ pattern_hint() {
     P007) echo "→ CHECK: เพิ่ม .env ใน .gitignore ถ้ายังไม่มี" ;;
     P008) echo "→ FIX: ใช้ express-validator หรือ zod validate req.body ก่อน process" ;;
     P009) echo "→ FIX: ใช้ parameterized query  ex: db.query('SELECT * WHERE id=?', [id])" ;;
-    P010) echo "→ FIX: ใช้ process.env.JWT_SECRET แทน hardcode" ;;
-    P011) echo "→ FIX: ใช้ crypto.createHash('sha256') หรือ bcrypt สำหรับ password" ;;
-    P012) echo "→ FIX: ส่ง token ผ่าน Authorization: Bearer <token> header" ;;
-    P013) echo "→ FIX: หลีกเลี่ยง eval() ใช้ JSON.parse() แทน" ;;
-    P014) echo "→ FIX: ใช้ Object.assign({}, defaults, input) แทน merge direct" ;;
-    P015) echo "→ FIX: const results = await Promise.all(items.map(fn))" ;;
-    P016) echo "→ FIX: ใช้ await fs.promises.readFile() แทน readFileSync" ;;
-    P017) echo "→ FIX: เก็บ ref แล้ว removeEventListener ใน cleanup" ;;
-    P018) echo "→ NOTE: สร้าง GitHub Issues track แทน TODO ใน code" ;;
-    P019) echo "→ FIX: ใส่ type จริงๆ หรือ unknown แล้วค่อย narrow" ;;
-    P020) echo "→ FIX: ใช้ optional chaining (?.) แทน non-null assertion (!)" ;;
-    P021) echo "→ NOTE: แยก module ย่อย — 1 ไฟล์ 1 responsibility" ;;
-    P022) echo "→ FIX: FROM node:20-alpine  (pin version เสมอ)" ;;
-    P023) echo "→ FIX: เพิ่ม USER node ก่อน CMD ใน Dockerfile" ;;
-    P024) echo "→ FIX: ใช้ Docker secrets หรือ runtime env แทน ENV" ;;
-    P025) echo "→ FIX: BASE_URL=process.env.BASE_URL || 'http://localhost:3000'" ;;
-    P026) echo "→ FIX: download script แยก verify checksum ก่อนรัน" ;;
-    P027) echo "→ FIX: ครอบด้วย <ErrorBoundary fallback={<Err/>}>" ;;
     *)    echo "→ INFO: ตรวจสอบด้วยตนเอง" ;;
   esac
 }
