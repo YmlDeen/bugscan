@@ -1,17 +1,14 @@
-# bugscan v4.0
+# debugxl — pattern-based code reviewer
 
-Static analysis wrapper สำหรับ Termux (aarch64)
-รวม shellcheck + bandit + eslint ไว้ในคำสั่งเดียว
+zero-dependency static analysis for Termux projects. pure bash.
 
-## Structure
+## Features
 
-```
-bugscan/
-├── bugscan.sh     ← main script
-├── install.sh     ← ติดตั้ง alias
-├── exports/       ← ไฟล์ export จาก -o
-└── README.md
-```
+- 27 patterns (P001-P027) — security, performance, code quality
+- 6 Termux-specific checks (T001-T006)
+- no external tools needed (no shellcheck/bandit/eslint)
+- snippet view in detail mode
+- export with AI prompt
 
 ## Install
 
@@ -21,63 +18,59 @@ bash install.sh
 source ~/.zshrc
 ```
 
-## Dependencies
-
-```bash
-pkg install shellcheck
-pip install bandit --break-system-packages
-npm install -g eslint
-```
+No dependencies. Just bash + grep + awk.
 
 ## Usage
 
 ```
-bugscan <path>            summary + HIGH + MEDIUM
-bugscan <path> -d         detail + fix hints + LOW
-bugscan <path> -o         export .txt + .md → exports/
-bugscan <path> -s <dir>   ข้าม dir (ใช้ซ้ำได้)
-bugscan --file <file>     scan ไฟล์เดียว
-bugscan <path> --json     output JSON
-bugscan <path> --fix-dry  preview autofix
-bugscan <path> --fix      autofix safe issues
-bugscan --diff            เทียบ 2 scan ล่าสุด
+debugxl <path>            default scan
+debugxl <path> -d         detail + code snippet
+debugxl <path> -o         export → $DL
+debugxl --file <file>     scan single file
+debugxl <path> -s <dir>   skip folder
 ```
 
-## Aliases
+## Change from bugscan
 
-```bash
-bs       → bugscan . -s node_modules
-bsd      → bs -d
-bso      → bs -o
-bsdiff   → bugscan --diff
-```
+- Removed shellcheck/bandit/eslint wrappers (unused on Termux)
+- Pure pattern-based — runs anywhere with bash
+- Termux-specific checks (native addons, /tmp/, lsof, etc)
+- Added DeBug XL logo and simpler output
 
-## Workflow
+## Patterns
 
-```bash
-bso                        # scan + export
-share exports/bugscan_*.txt  # ส่งไป Download/
-# แนบ .txt ให้ Claude → แก้ HIGH ก่อนเสมอ
-bsdiff                     # เทียบก่อน/หลัง
-```
-
-## Output
-
-```
-exports/
-├── bugscan_YYYYMMDD_HHMMSS.txt   ← ส่ง Claude
-└── bugscan_YYYYMMDD_HHMMSS.md    ← อ่านเอง
-```
-
-## Note
-
-- HIGH > 5 → แก้ทีละไฟล์ ไม่ batch
-- gsave มี bugscan check — HIGH หยุด push
-
-## Changelog
-
-| version | date       | changes |
-|---------|------------|---------|
-| v4.0    | 2026-04-19 | เพิ่ม eslint, --json, --fix-dry, --fix, --diff, export .txt+.md |
-| v2.0    | 2026-04-18 | severity filter, summary box, --ai export, fix hints |
-| v1.0    | 2026-04-18 | initial: shellcheck + bandit |
+| Code | Severity | Check |
+|------|----------|-------|
+| P001 | HIGH | hardcoded secret/password |
+| P002 | HIGH | SQL string concat |
+| P003 | HIGH | eval() |
+| P004 | HIGH | JWT secret hardcode |
+| P005 | MED | token/key in URL |
+| P006 | MED | weak crypto MD5/SHA1 |
+| P007 | HIGH | prototype pollution |
+| P008 | HIGH | .env committed |
+| P009 | INFO | await in loop |
+| P010 | INFO | sync fs in async |
+| P011 | INFO | event listener leak |
+| P012 | INFO | console.log |
+| P013 | MED | async no try/catch |
+| P014 | INFO | server no cleanup |
+| P015 | MED | fs.write no error handling |
+| P016 | MED | no set -e (shell) |
+| P017 | INFO | TODO/FIXME |
+| P018 | INFO | file too large |
+| P019 | INFO | TypeScript any |
+| P020 | HIGH | curl|bash in package.json |
+| P021 | INFO | Dockerfile :latest |
+| P022 | INFO | Dockerfile no USER |
+| P023 | HIGH | secret in Dockerfile |
+| P024 | INFO | hardcoded localhost |
+| P025 | MED | input validation missing |
+| P026 | INFO | React no ErrorBoundary |
+| P027 | INFO | shebang not portable |
+| T001 | HIGH | native .node addon |
+| T002 | INFO | /tmp/ usage |
+| T003 | INFO | hardcoded DL path |
+| T004 | INFO | .DS_Store |
+| T005 | INFO | lsof on Termux |
+| T006 | INFO | ss on Termux |

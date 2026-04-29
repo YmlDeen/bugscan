@@ -1,42 +1,27 @@
 #!/usr/bin/env bash
+# install.sh — ติดตั้ง debugxl ให้ใช้งานได้ทั่วระบบ
 set -euo pipefail
-# install.sh — ติดตั้ง bugscan ให้ใช้งานได้ทั่วระบบ
-# usage: bash install.sh
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MAIN="$SCRIPT_DIR/bugscan.sh"
-ZSHRC="$HOME/.zshrc"
-BASHRC="$HOME/.bashrc"
+MAIN="$SCRIPT_DIR/debugxl.sh"
 
-echo ""
-echo "  bugscan installer"
-echo "  project: $SCRIPT_DIR"
-echo ""
-
-# 1. chmod
 chmod +x "$MAIN"
-echo "  ✓ chmod +x bugscan.sh"
+echo "  ✓ chmod +x debugxl.sh"
 
-# 2. เพิ่ม alias ถ้ายังไม่มี
-add_alias() {
-  local rcfile="$1"
-  [[ ! -f "$rcfile" ]] && return
-  if grep -q 'alias bugscan=' "$rcfile" 2>/dev/null; then
-    # อัปเดต path ถ้าเปลี่ยน
-    sed -i "s|alias bugscan=.*|alias bugscan='bash $MAIN'|" "$rcfile"
-    echo "  ✓ updated alias in $rcfile"
+for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
+  [[ ! -f "$rc" ]] && continue
+  if grep -q 'alias debugxl=' "$rc" 2>/dev/null; then
+    sed -i "s|alias debugxl=.*|alias debugxl='bash $MAIN'|" "$rc"
+    echo "  ✓ updated alias in $(basename $rc)"
   else
-    echo "" >> "$rcfile"
-    echo "# bugscan — static analysis (projects/bugscan/)" >> "$rcfile"
-    echo "alias bugscan='bash $MAIN'" >> "$rcfile"
-    echo "  ✓ added alias to $rcfile"
+    echo "" >> "$rc"
+    echo "# debugxl — pattern code reviewer (projects/bugscan/)" >> "$rc"
+    echo "alias debugxl='bash $MAIN'" >> "$rc"
+    echo "  ✓ added alias to $(basename $rc)"
   fi
-}
-
-add_alias "$ZSHRC"
-add_alias "$BASHRC"
+done
 
 echo ""
-echo "  done — reload shell:"
-echo "    source ~/.zshrc"
+echo "  done — reload: source ~/.zshrc"
+echo "  usage: debugxl .   (no dependencies needed)"
 echo ""
