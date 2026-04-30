@@ -2,5 +2,3 @@ exports/
 node_modules/
 .env
 *.bak.*
-*.bak
-/tmp/

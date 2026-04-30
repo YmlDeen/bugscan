@@ -1,14 +1,20 @@
 # CHANGELOG
 
-## v1.0.0 — 2026-04-29
+## v4.1.0 — 2026-04-24
 
-### Major rewrite: bugscan → DeBug XL
+### ✨ Features
+- export --ai to exports/, add .gitignore  `3b1f2db`
 
-- Removed shellcheck/bandit/eslint wrappers (unused on Termux)
-- Pure pattern-based scanning — zero dependencies
-- 27 patterns (P001-P027): security, performance, code quality
-- 6 Termux-specific checks (T001-T006)
-- New DeBug XL logo and cleaner output
-- Termux-aware: detects native addons, /tmp/ misuse, lsof/ss
-- detail mode (-d) with code snippets and fix hints
-- export mode (-o) with AI prompt
+### 🐛 Bug Fixes
+- add set -euo pipefail  `aa0b61f`
+- export --ai to storage/downloads  `28352a5`
+
+### 🔧 Chore
+- add package.json v4.0.0 + update .gitignore  `6733c6f`
+
+### 📦 Other
+- update  `b66ff12`
+- update  `5fa235d`
+- add/update README.md  `0ac835f`
+
+

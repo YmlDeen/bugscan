@@ -1,9 +1,9 @@
 {
-  "name": "debugxl",
-  "version": "1.0.0",
-  "description": "Pattern-based code reviewer — no dependencies, pure bash",
+  "name": "bugscan",
+  "version": "4.1.0",
+  "description": "Static analysis CLI for Termux projects",
   "bin": {
-    "debugxl": "./debugxl.sh"
+    "bs": "./bugscan.sh"
   },
   "license": "MIT"
 }
